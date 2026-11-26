@@ -29,22 +29,49 @@ def get_watchlist():
     return symbols
 
 
+import time
+
+CACHE = {"time": 0, "data": []}
+
 def get_stock_data(symbols):
+    if not symbols:
+        return []
+    if time.time() - CACHE["time"] < 30 and len(CACHE["data"]) == len(symbols):
+        return CACHE["data"]
+
+    try:
+        df = yf.download(
+            tickers=symbols,
+            period="2d",
+            interval="1d",
+            group_by="ticker",
+            threads=True,
+            progress=False
+        )
+    except Exception:
+        df = None
+
     results = []
+    single = len(symbols) == 1
+
     for sym in symbols:
         try:
-            ticker = yf.Ticker(sym)
-            info = ticker.fast_info
-            price = round(info.last_price, 2)
-            prev_close = round(info.previous_close, 2)
-            day_high = round(info.day_high, 2)
-            day_low = round(info.day_low, 2)
-            
+            sub = df if single else df[sym]
+            sub = sub.dropna(subset=["Close"])
+            if len(sub) == 0:
+                raise ValueError("No data")
+
+            latest = sub.iloc[-1]
+            price = round(float(latest["Close"]), 2)
+            day_high = round(float(latest["High"]), 2)
+            day_low = round(float(latest["Low"]), 2)
+            prev_close = round(float(sub.iloc[-2]["Close"]), 2) if len(sub) >= 2 else round(float(latest["Open"]), 2)
+
             change = round(price - prev_close, 2)
             pct_change = round((change / prev_close) * 100, 2) if prev_close else 0.0
             high_pct = round(((day_high - prev_close) / prev_close) * 100, 2) if prev_close else 0.0
             low_pct = round(((day_low - prev_close) / prev_close) * 100, 2) if prev_close else 0.0
-            
+
             results.append({
                 "symbol": sym.replace(".NS", "").replace(".BO", ""),
                 "full_symbol": sym,
@@ -58,7 +85,7 @@ def get_stock_data(symbols):
             })
         except Exception:
             results.append({
-                "symbol": sym,
+                "symbol": sym.replace(".NS", "").replace(".BO", ""),
                 "full_symbol": sym,
                 "price": "N/A",
                 "day_high": "N/A",
@@ -68,6 +95,9 @@ def get_stock_data(symbols):
                 "change": 0,
                 "pct_change": 0
             })
+
+    CACHE["time"] = time.time()
+    CACHE["data"] = results
     return results
 
 @app.route("/")
