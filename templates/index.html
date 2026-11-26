@@ -3,9 +3,12 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Live Share Market Watchlist</title>
+      <title>Live Share Market Watchlist</title>
+    <link rel="manifest" href="/manifest.json">
+    <meta name="theme-color" content="#10b981">
     <script src="https://cdn.tailwindcss.com"></script>
 </head>
+
 <body class="bg-slate-900 text-white min-h-screen p-4 md:p-8">
     <div class="max-w-5xl mx-auto">
         <!-- Header with Title and Add Stock Form -->
@@ -76,7 +79,7 @@
                         <th class="py-3 px-4 text-right">High (₹ / %)</th>
                         <th class="py-3 px-4 text-right">Low (₹ / %)</th>
                         <th class="py-3 px-4 text-right">Change (₹ / %)</th>
-                        
+
                     </tr>
                 </thead>
                 <tbody id="watchlistBody" class="divide-y divide-slate-700 text-sm"></tbody>
@@ -151,7 +154,7 @@
                         <td class="py-3.5 px-4 text-right font-mono text-emerald-300">${stock.day_high} (${stock.high_pct >= 0 ? '+' : ''}${stock.high_pct}%)</td>
                         <td class="py-3.5 px-4 text-right font-mono text-rose-300">${stock.day_low} (${stock.low_pct >= 0 ? '+' : ''}${stock.low_pct}%)</td>
                         <td class="py-3.5 px-4 text-right font-mono ${isPos ? 'text-emerald-400' : 'text-rose-400'}">${isPos ? '+' : ''}${stock.change} (${isPos ? '+' : ''}${stock.pct_change}%)</td>
-                        
+
                     </tr>`;
             });
         }
@@ -202,9 +205,10 @@
         }
 
 
-     
-        fetchPrices();
-        setInterval(fetchPrices, 30000); // Refresh every 30 seconds to prevent rate-limits
+
+
+          fetchPrices();
+        setInterval(fetchPrices, 10000);
 
         if ('serviceWorker' in navigator) {
             navigator.serviceWorker.register('/sw.js');
