@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Live Share Market Watchlist</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-slate-900 text-white min-h-screen p-4 md:p-8">
+    <div class="max-w-5xl mx-auto">
+        <!-- Header with Title and Add Stock Form -->
+        <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between mb-6 gap-3">
+            <div>
+                <h1 class="text-2xl font-bold text-emerald-400">NSE Live Watchlist</h1>
+                <p id="status" class="text-xs text-slate-400">Updating...</p>
+            </div>
+                        <div class="flex gap-2">
+                <input id="symbolInput" type="text" placeholder="e.g. TATAMOTORS"
+                    class="bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm w-full sm:w-44 focus:outline-none focus:border-emerald-400">
+                <button onclick="addStock()"
+                    class="bg-emerald-500 hover:bg-emerald-600 text-slate-950 font-semibold px-4 py-2 rounded-lg text-sm">
+                    Add
+                </button>
+                <input id="excelInput" type="file" accept=".xlsx" class="hidden" onchange="uploadExcel()">
+                <button onclick="document.getElementById('excelInput').click()"
+                    class="bg-sky-500 hover:bg-sky-600 text-slate-950 font-semibold px-4 py-2 rounded-lg text-sm whitespace-nowrap">
+                    Upload Excel
+                </button>
+            </div>
+
+        </div>
+
+                <!-- Filter Tabs + Sort Button -->
+        <div class="flex flex-wrap items-center justify-between gap-2 mb-4 relative">
+            <div class="flex gap-2">
+                <button id="tab-all" onclick="setTab('all')" class="px-3.5 py-1.5 rounded-lg text-xs font-semibold bg-emerald-500 text-slate-950 transition">All Stocks</button>
+                <button id="tab-gainers" onclick="setTab('gainers')" class="px-3.5 py-1.5 rounded-lg text-xs font-semibold bg-slate-800 text-slate-300 hover:bg-slate-700 transition">▲ Top Gainers</button>
+                <button id="tab-losers" onclick="setTab('losers')" class="px-3.5 py-1.5 rounded-lg text-xs font-semibold bg-slate-800 text-slate-300 hover:bg-slate-700 transition">▼ Top Losers</button>
+            </div>
+
+            <button onclick="toggleSortMenu()" class="px-3.5 py-1.5 rounded-lg text-xs font-semibold bg-slate-800 border border-slate-700 text-slate-200 hover:bg-slate-700 transition">
+                Sort ⇅
+            </button>
+
+            <!-- Sort Dropdown Menu (Matching Screenshot) -->
+            <div id="sortMenu" class="hidden absolute right-0 top-10 w-64 bg-slate-800 border border-slate-700 rounded-xl shadow-2xl z-20 divide-y divide-slate-700">
+                <div class="px-4 py-2.5 flex justify-between items-center">
+                    <span class="font-bold text-sm text-white">Sort</span>
+                    <button onclick="resetSort()" class="text-xs text-sky-400 hover:underline">Reset</button>
+                </div>
+                <button onclick="applySort('symbol')" class="w-full px-4 py-3 text-left text-sm flex items-center gap-3 hover:bg-slate-700/50">
+                    <span class="font-bold text-slate-400 w-7">A-Z</span>
+                    <span>Alphabetically</span>
+                    <span id="arrow-symbol" class="ml-auto text-sky-400 font-bold"></span>
+                </button>
+                <button onclick="applySort('pct_change')" class="w-full px-4 py-3 text-left text-sm flex items-center gap-3 hover:bg-slate-700/50">
+                    <span id="arrow-pct_change" class="font-bold text-sky-400 w-7">↓</span>
+                    <span>Change</span>
+                </button>
+                <button onclick="applySort('price')" class="w-full px-4 py-3 text-left text-sm flex items-center gap-3 hover:bg-slate-700/50">
+                    <span class="font-bold text-slate-400 w-7">LTP</span>
+                    <span>Last Traded Price</span>
+                    <span id="arrow-price" class="ml-auto text-sky-400 font-bold"></span>
+                </button>
+            </div>
+        </div>
+
+
+        <!-- Responsive Data Table -->
+        <div class="bg-slate-800 rounded-xl border border-slate-700 overflow-x-auto shadow-lg">
+            <table class="w-full text-left border-collapse whitespace-nowrap">
+                <thead>
+                    <tr class="bg-slate-700/50 text-slate-300 text-xs uppercase">
+                        <th class="py-3 px-4">Symbol</th>
+                        <th class="py-3 px-4 text-right">Price (₹)</th>
+                        <th class="py-3 px-4 text-right">High (₹ / %)</th>
+                        <th class="py-3 px-4 text-right">Low (₹ / %)</th>
+                        <th class="py-3 px-4 text-right">Change (₹ / %)</th>
+                        
+                    </tr>
+                </thead>
+                <tbody id="watchlistBody" class="divide-y divide-slate-700 text-sm"></tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- Frontend Script for Filtering, Sorting, and Polling /api/prices -->
+    <script>
+        let stockData = [], currentTab = 'all', sortField = null, sortDir = null;
+
+        function setTab(tab) {
+            currentTab = tab;
+            ['all', 'gainers', 'losers'].forEach(t => {
+                const btn = document.getElementById('tab-' + t);
+                btn.className = t === tab
+                    ? 'px-3.5 py-1.5 rounded-lg text-xs font-semibold bg-emerald-500 text-slate-950 transition'
+                    : 'px-3.5 py-1.5 rounded-lg text-xs font-semibold bg-slate-800 text-slate-300 hover:bg-slate-700 transition';
+            });
+            renderTable();
+        }
+
+               function toggleSortMenu() {
+            document.getElementById('sortMenu').classList.toggle('hidden');
+        }
+
+        function applySort(field) {
+            if (sortField === field) {
+                sortDir = sortDir === 'asc' ? 'desc' : 'asc';
+            } else {
+                sortField = field;
+                sortDir = field === 'symbol' ? 'asc' : 'desc';
+            }
+            updateArrows();
+            renderTable();
+        }
+
+        function resetSort() {
+            sortField = null;
+            sortDir = null;
+            updateArrows();
+            renderTable();
+        }
+
+        function updateArrows() {
+            document.getElementById('arrow-symbol').innerText = sortField === 'symbol' ? (sortDir === 'asc' ? '↑' : '↓') : '';
+            document.getElementById('arrow-pct_change').innerText = sortField === 'pct_change' ? (sortDir === 'desc' ? '↓' : '↑') : '↓';
+            document.getElementById('arrow-price').innerText = sortField === 'price' ? (sortDir === 'desc' ? '↓' : '↑') : '';
+        }
+
+        function renderTable() {
+            const tbody = document.getElementById('watchlistBody');
+            tbody.innerHTML = '';
+            let filtered = [...stockData];
+            if (currentTab === 'gainers') filtered = filtered.filter(s => s.pct_change > 0);
+            if (currentTab === 'losers') filtered = filtered.filter(s => s.pct_change < 0);
+            if (sortField && sortDir) {
+                filtered.sort((a, b) => {
+                    if (sortField === 'symbol') {
+                        return sortDir === 'asc' ? a.symbol.localeCompare(b.symbol) : b.symbol.localeCompare(a.symbol);
+                    }
+                    return sortDir === 'desc' ? b[sortField] - a[sortField] : a[sortField] - b[sortField];
+                });
+            }
+
+            filtered.forEach(stock => {
+                const isPos = stock.change >= 0;
+                tbody.innerHTML += `
+                    <tr class="hover:bg-slate-700/30 transition">
+                        <td class="py-3.5 px-4 font-semibold">${stock.symbol}</td>
+                        <td class="py-3.5 px-4 text-right font-mono">${stock.price}</td>
+                        <td class="py-3.5 px-4 text-right font-mono text-emerald-300">${stock.day_high} (${stock.high_pct >= 0 ? '+' : ''}${stock.high_pct}%)</td>
+                        <td class="py-3.5 px-4 text-right font-mono text-rose-300">${stock.day_low} (${stock.low_pct >= 0 ? '+' : ''}${stock.low_pct}%)</td>
+                        <td class="py-3.5 px-4 text-right font-mono ${isPos ? 'text-emerald-400' : 'text-rose-400'}">${isPos ? '+' : ''}${stock.change} (${isPos ? '+' : ''}${stock.pct_change}%)</td>
+                        
+                    </tr>`;
+            });
+        }
+
+                async function addStock() {
+            const input = document.getElementById('symbolInput');
+            if (!input.value.trim()) return;
+            await fetch('/api/add', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ symbol: input.value })
+            });
+            input.value = '';
+            fetchPrices();
+        }
+
+        async function fetchPrices() {
+            try {
+                const res = await fetch('/api/prices');
+                stockData = await res.json();
+                renderTable();
+                document.getElementById('status').innerText = 'Last updated: ' + new Date().toLocaleTimeString();
+            } catch (e) {
+                document.getElementById('status').innerText = 'Connection error';
+            }
+        }
+
+             async function uploadExcel() {
+            const fileInput = document.getElementById('excelInput');
+            if (!fileInput.files.length) return;
+
+            const formData = new FormData();
+            formData.append('file', fileInput.files[0]);
+
+            document.getElementById('status').innerText = 'Uploading Excel...';
+            try {
+                const res = await fetch('/api/upload', { method: 'POST', body: formData });
+                const result = await res.json();
+                if (result.status === 'ok') {
+                    fetchPrices();
+                } else {
+                    alert(result.message || 'Upload failed');
+                }
+            } catch (e) {
+                alert('Error uploading file');
+            }
+            fileInput.value = '';
+        }
+
+
+     
+
+        fetchPrices();
+        setInterval(fetchPrices, 10000);
+    </script>
+</body>
+</html>
