@@ -146,12 +146,38 @@ def upload_excel():
         conn.execute("INSERT OR IGNORE INTO stocks VALUES (?)", (sym,))
         added_count += 1
 
-    conn.commit()
+       conn.commit()
     conn.close()
+    CACHE["time"] = 0
     return jsonify({"status": "ok", "added": added_count})
 
+@app.route("/manifest.json")
+def manifest():
+    return jsonify({
+        "name": "NSE Live Watchlist",
+        "short_name": "NSE Watchlist",
+        "start_url": "/",
+        "display": "standalone",
+        "background_color": "#0f172a",
+        "theme_color": "#10b981",
+        "description": "Live Indian Share Market Watchlist",
+        "icons": [
+            {
+                "src": "https://flaticon.com",
+                "sizes": "512x512",
+                "type": "image/png"
+            }
+        ]
+    })
+
+@app.route("/sw.js")
+def service_worker():
+    return "self.addEventListener('fetch', function(event) {});", 200, {"Content-Type": "application/javascript"}
+
+init_db()
+
 if __name__ == "__main__":
-    init_db()
     app.run(host="0.0.0.0", port=5000, debug=False)
+
 
 
