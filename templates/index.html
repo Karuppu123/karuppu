@@ -203,9 +203,13 @@
 
 
      
-
         fetchPrices();
-        setInterval(fetchPrices, 10000);
+        setInterval(fetchPrices, 30000); // Refresh every 30 seconds to prevent rate-limits
+
+        if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.register('/sw.js');
+        }
     </script>
 </body>
 </html>
+
