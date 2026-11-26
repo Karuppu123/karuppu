@@ -29,43 +29,16 @@ def get_watchlist():
     return symbols
 
 
-import time
-
-CACHE = {"time": 0, "data": []}
-
 def get_stock_data(symbols):
-    if not symbols:
-        return []
-    if time.time() - CACHE["time"] < 30 and len(CACHE["data"]) == len(symbols):
-        return CACHE["data"]
-
-    try:
-        df = yf.download(
-            tickers=symbols,
-            period="2d",
-            interval="1d",
-            group_by="ticker",
-            threads=True,
-            progress=False
-        )
-    except Exception:
-        df = None
-
     results = []
-    single = len(symbols) == 1
-
     for sym in symbols:
         try:
-            sub = df if single else df[sym]
-            sub = sub.dropna(subset=["Close"])
-            if len(sub) == 0:
-                raise ValueError("No data")
-
-            latest = sub.iloc[-1]
-            price = round(float(latest["Close"]), 2)
-            day_high = round(float(latest["High"]), 2)
-            day_low = round(float(latest["Low"]), 2)
-            prev_close = round(float(sub.iloc[-2]["Close"]), 2) if len(sub) >= 2 else round(float(latest["Open"]), 2)
+            ticker = yf.Ticker(sym)
+            info = ticker.fast_info
+            price = round(info.last_price, 2)
+            prev_close = round(info.previous_close, 2)
+            day_high = round(info.day_high, 2)
+            day_low = round(info.day_low, 2)
 
             change = round(price - prev_close, 2)
             pct_change = round((change / prev_close) * 100, 2) if prev_close else 0.0
@@ -85,7 +58,7 @@ def get_stock_data(symbols):
             })
         except Exception:
             results.append({
-                "symbol": sym.replace(".NS", "").replace(".BO", ""),
+                "symbol": sym,
                 "full_symbol": sym,
                 "price": "N/A",
                 "day_high": "N/A",
@@ -95,10 +68,30 @@ def get_stock_data(symbols):
                 "change": 0,
                 "pct_change": 0
             })
-
-    CACHE["time"] = time.time()
-    CACHE["data"] = results
     return results
+    @app.route("/manifest.json")
+def manifest():
+    return jsonify({
+        "name": "NSE Live Watchlist",
+        "short_name": "NSE Watchlist",
+        "start_url": "/",
+        "display": "standalone",
+        "background_color": "#0f172a",
+        "theme_color": "#10b981",
+        "description": "Live Indian Share Market Watchlist",
+        "icons": [
+            {
+                "src": "https://flaticon.com",
+                "sizes": "512x512",
+                "type": "image/png"
+            }
+        ]
+    })
+
+@app.route("/sw.js")
+def service_worker():
+    return "self.addEventListener('fetch', function(event) {});", 200, {"Content-Type": "application/javascript"}
+
 
 @app.route("/")
 def index():
@@ -146,9 +139,8 @@ def upload_excel():
         conn.execute("INSERT OR IGNORE INTO stocks VALUES (?)", (sym,))
         added_count += 1
 
-       conn.commit()
+     conn.commit()
     conn.close()
-    CACHE["time"] = 0
     return jsonify({"status": "ok", "added": added_count})
 
 @app.route("/manifest.json")
@@ -174,10 +166,9 @@ def manifest():
 def service_worker():
     return "self.addEventListener('fetch', function(event) {});", 200, {"Content-Type": "application/javascript"}
 
-init_db()
-
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=False)
 
+    init_db()
+    app.run(host="0.0.0.0", port=5000, debug=False)
 
 
