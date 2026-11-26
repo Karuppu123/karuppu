@@ -1,4 +1,5 @@
 import os
+import time
 import sqlite3
 import openpyxl
 from flask import Flask, render_template, jsonify, request
@@ -8,6 +9,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 app = Flask(__name__, template_folder=os.path.join(BASE_DIR, "templates"))
 DB_FILE = os.path.join(BASE_DIR, "watchlist.db")
 
+CACHE = {"time": 0, "data": []}
 
 def init_db():
     conn = sqlite3.connect(DB_FILE)
@@ -28,17 +30,39 @@ def get_watchlist():
     conn.close()
     return symbols
 
-
 def get_stock_data(symbols):
+    if not symbols:
+        return []
+    if time.time() - CACHE["time"] < 30 and len(CACHE["data"]) == len(symbols):
+        return CACHE["data"]
+
+    try:
+        df = yf.download(
+            tickers=symbols,
+            period="2d",
+            interval="1d",
+            group_by="ticker",
+            threads=True,
+            progress=False
+        )
+    except Exception:
+        df = None
+
     results = []
+    single = len(symbols) == 1
+
     for sym in symbols:
         try:
-            ticker = yf.Ticker(sym)
-            info = ticker.fast_info
-            price = round(info.last_price, 2)
-            prev_close = round(info.previous_close, 2)
-            day_high = round(info.day_high, 2)
-            day_low = round(info.day_low, 2)
+            sub = df if single else df[sym]
+            sub = sub.dropna(subset=["Close"])
+            if len(sub) == 0:
+                raise ValueError("No data")
+
+            latest = sub.iloc[-1]
+            price = round(float(latest["Close"]), 2)
+            day_high = round(float(latest["High"]), 2)
+            day_low = round(float(latest["Low"]), 2)
+            prev_close = round(float(sub.iloc[-2]["Close"]), 2) if len(sub) >= 2 else round(float(latest["Open"]), 2)
 
             change = round(price - prev_close, 2)
             pct_change = round((change / prev_close) * 100, 2) if prev_close else 0.0
@@ -58,7 +82,7 @@ def get_stock_data(symbols):
             })
         except Exception:
             results.append({
-                "symbol": sym,
+                "symbol": sym.replace(".NS", "").replace(".BO", ""),
                 "full_symbol": sym,
                 "price": "N/A",
                 "day_high": "N/A",
@@ -68,30 +92,10 @@ def get_stock_data(symbols):
                 "change": 0,
                 "pct_change": 0
             })
+
+    CACHE["time"] = time.time()
+    CACHE["data"] = results
     return results
-    @app.route("/manifest.json")
-def manifest():
-    return jsonify({
-        "name": "NSE Live Watchlist",
-        "short_name": "NSE Watchlist",
-        "start_url": "/",
-        "display": "standalone",
-        "background_color": "#0f172a",
-        "theme_color": "#10b981",
-        "description": "Live Indian Share Market Watchlist",
-        "icons": [
-            {
-                "src": "https://flaticon.com",
-                "sizes": "512x512",
-                "type": "image/png"
-            }
-        ]
-    })
-
-@app.route("/sw.js")
-def service_worker():
-    return "self.addEventListener('fetch', function(event) {});", 200, {"Content-Type": "application/javascript"}
-
 
 @app.route("/")
 def index():
@@ -101,17 +105,17 @@ def index():
 def api_prices():
     return jsonify(get_stock_data(get_watchlist()))
 
-
 @app.route("/api/add", methods=["POST"])
 def add_stock():
     symbol = request.json.get("symbol", "").strip().upper()
     if symbol and not (symbol.endswith(".NS") or symbol.endswith(".BO")):
-        symbol += ".NS"  # Default to NSE
+        symbol += ".NS"
     if symbol:
         conn = sqlite3.connect(DB_FILE)
         conn.execute("INSERT OR IGNORE INTO stocks VALUES (?)", (symbol,))
         conn.commit()
         conn.close()
+        CACHE["time"] = 0
     return jsonify({"status": "ok", "watchlist": get_watchlist()})
 
 @app.route("/api/upload", methods=["POST"])
@@ -121,7 +125,7 @@ def upload_excel():
 
     file = request.files["file"]
     if not file.filename.endswith((".xlsx", ".xls")):
-        return jsonify({"status": "error", "message": "Please upload a valid .xlsx Excel file"}), 400
+        return jsonify({"status": "error", "message": "Please upload a .xlsx Excel file"}), 400
 
     wb = openpyxl.load_workbook(file, data_only=True)
     sheet = wb.active
@@ -139,8 +143,9 @@ def upload_excel():
         conn.execute("INSERT OR IGNORE INTO stocks VALUES (?)", (sym,))
         added_count += 1
 
-     conn.commit()
+    conn.commit()
     conn.close()
+    CACHE["time"] = 0
     return jsonify({"status": "ok", "added": added_count})
 
 @app.route("/manifest.json")
@@ -166,9 +171,7 @@ def manifest():
 def service_worker():
     return "self.addEventListener('fetch', function(event) {});", 200, {"Content-Type": "application/javascript"}
 
+init_db()
+
 if __name__ == "__main__":
-
-    init_db()
     app.run(host="0.0.0.0", port=5000, debug=False)
-
-
