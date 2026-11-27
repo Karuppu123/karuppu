@@ -4,6 +4,7 @@ import logging
 import sqlite3
 import threading
 import openpyxl
+import pandas as pd
 from flask import Flask, render_template, jsonify, request
 import yfinance as yf
 
@@ -58,63 +59,72 @@ def get_stock_data(symbols, force=False):
         return []
 
     with FETCH_LOCK:
-        if not force and time.time() - CACHE["time"] < 1 and len(CACHE["data"]) == len(symbols):
+        # 30-second cache prevents Render 502 memory crashes and Yahoo rate limits
+        if not force and time.time() - CACHE["time"] < 30 and len(CACHE["data"]) == len(symbols):
             return CACHE["data"]
-        active_symbols = [s for s in symbols if s not in DEAD_SYMBOLS]
-        df = None
 
-        if active_symbols:
+        active_symbols = [s for s in symbols if s not in DEAD_SYMBOLS]
+        data_map = {}
+
+        # Download in batches of 25 with threads=False to stay under Render's 512MB RAM limit
+        chunk_size = 25
+        for i in range(0, len(active_symbols), chunk_size):
+            batch = active_symbols[i : i + chunk_size]
             try:
                 df = yf.download(
-                    tickers=active_symbols,
-                    period="2d",
+                    tickers=batch,
+                    period="5d",
                     interval="1d",
                     group_by="ticker",
-                    threads=True,
+                    threads=False,
                     progress=False,
                 )
             except Exception:
                 df = None
 
-        results = []
-        single = len(active_symbols) == 1
-
-        for sym in symbols:
-            if sym in DEAD_SYMBOLS or df is None or df.empty:
-                results.append(_na_entry(sym))
+            if df is None or df.empty:
                 continue
 
-            try:
-                sub = df if single else df[sym]
-                sub = sub.dropna(subset=["Close"])
-                if len(sub) == 0:
-                    raise ValueError("No data")
+            for sym in batch:
+                try:
+                    if isinstance(df.columns, pd.MultiIndex):
+                        if sym in df.columns.get_level_values(0):
+                            sub = df[sym]
+                        elif sym in df.columns.get_level_values(1):
+                            sub = df.xs(sym, axis=1, level=1)
+                        else:
+                            raise ValueError("Missing")
+                    else:
+                        sub = df
 
-                latest = sub.iloc[-1]
-                price = round(float(latest["Close"]), 2)
-                day_high = round(float(latest["High"]), 2)
-                day_low = round(float(latest["Low"]), 2)
-                prev_close = (
-                    round(float(sub.iloc[-2]["Close"]), 2)
-                    if len(sub) >= 2
-                    else round(float(latest["Open"]), 2)
-                )
+                    sub = sub.dropna(subset=["Close"])
+                    if len(sub) == 0:
+                        raise ValueError("Empty")
 
-                change = round(price - prev_close, 2)
-                pct_change = round((change / prev_close) * 100, 2) if prev_close else 0.0
-                high_pct = (
-                    round(((day_high - prev_close) / prev_close) * 100, 2)
-                    if prev_close
-                    else 0.0
-                )
-                low_pct = (
-                    round(((day_low - prev_close) / prev_close) * 100, 2)
-                    if prev_close
-                    else 0.0
-                )
+                    latest = sub.iloc[-1]
+                    price = round(float(latest["Close"]), 2)
+                    day_high = round(float(latest["High"]), 2)
+                    day_low = round(float(latest["Low"]), 2)
+                    prev_close = (
+                        round(float(sub.iloc[-2]["Close"]), 2)
+                        if len(sub) >= 2
+                        else round(float(latest["Open"]), 2)
+                    )
 
-                results.append(
-                    {
+                    change = round(price - prev_close, 2)
+                    pct_change = round((change / prev_close) * 100, 2) if prev_close else 0.0
+                    high_pct = (
+                        round(((day_high - prev_close) / prev_close) * 100, 2)
+                        if prev_close
+                        else 0.0
+                    )
+                    low_pct = (
+                        round(((day_low - prev_close) / prev_close) * 100, 2)
+                        if prev_close
+                        else 0.0
+                    )
+
+                    data_map[sym] = {
                         "symbol": sym.replace(".NS", "").replace(".BO", ""),
                         "full_symbol": sym,
                         "price": price,
@@ -125,14 +135,14 @@ def get_stock_data(symbols, force=False):
                         "change": change,
                         "pct_change": pct_change,
                     }
-                )
-            except Exception:
-                DEAD_SYMBOLS.add(sym)
-                results.append(_na_entry(sym))
+                except Exception:
+                    DEAD_SYMBOLS.add(sym)
 
+        results = [data_map.get(sym, _na_entry(sym)) for sym in symbols]
         CACHE["time"] = time.time()
         CACHE["data"] = results
         return results
+
 
 
 @app.route("/")
