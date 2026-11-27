@@ -1,15 +1,23 @@
 import os
 import time
+import logging
 import sqlite3
+import threading
 import openpyxl
 from flask import Flask, render_template, jsonify, request
 import yfinance as yf
+
+# Silence yfinance console errors
+logging.getLogger("yfinance").setLevel(logging.CRITICAL)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 app = Flask(__name__, template_folder=os.path.join(BASE_DIR, "templates"))
 DB_FILE = os.path.join(BASE_DIR, "watchlist.db")
 
 CACHE = {"time": 0, "data": []}
+DEAD_SYMBOLS = set()
+FETCH_LOCK = threading.Lock()
+
 
 def init_db():
     conn = sqlite3.connect(DB_FILE)
@@ -17,10 +25,10 @@ def init_db():
     cur.execute("CREATE TABLE IF NOT EXISTS stocks (symbol TEXT PRIMARY KEY)")
     cur.execute("SELECT COUNT(*) FROM stocks")
     if cur.fetchone()[0] == 0:
-        defaults = [("RELIANCE.NS",), ("TCS.NS",), ("HDFCBANK.NS",), ("INFY.NS",), ("ICICIBANK.NS",)]
-        cur.executemany("INSERT INTO stocks VALUES (?)", defaults)
+        cur.executemany("INSERT INTO stocks VALUES (?)", [("RELIANCE.NS",)])
     conn.commit()
     conn.close()
+
 
 def get_watchlist():
     conn = sqlite3.connect(DB_FILE)
@@ -30,80 +38,129 @@ def get_watchlist():
     conn.close()
     return symbols
 
-def get_stock_data(symbols):
+
+def _na_entry(sym):
+    return {
+        "symbol": sym.replace(".NS", "").replace(".BO", ""),
+        "full_symbol": sym,
+        "price": "N/A",
+        "day_high": "N/A",
+        "high_pct": 0,
+        "day_low": "N/A",
+        "low_pct": 0,
+        "change": 0,
+        "pct_change": 0,
+    }
+
+
+def get_stock_data(symbols, force=False):
     if not symbols:
         return []
-    if time.time() - CACHE["time"] < 30 and len(CACHE["data"]) == len(symbols):
-        return CACHE["data"]
 
-    try:
-        df = yf.download(
-            tickers=symbols,
-            period="2d",
-            interval="1d",
-            group_by="ticker",
-            threads=True,
-            progress=False
-        )
-    except Exception:
+    with FETCH_LOCK:
+        if not force and time.time() - CACHE["time"] < 1 and len(CACHE["data"]) == len(symbols):
+            return CACHE["data"]
+        active_symbols = [s for s in symbols if s not in DEAD_SYMBOLS]
         df = None
 
-    results = []
-    single = len(symbols) == 1
+        if active_symbols:
+            try:
+                df = yf.download(
+                    tickers=active_symbols,
+                    period="2d",
+                    interval="1d",
+                    group_by="ticker",
+                    threads=True,
+                    progress=False,
+                )
+            except Exception:
+                df = None
 
-    for sym in symbols:
-        try:
-            sub = df if single else df[sym]
-            sub = sub.dropna(subset=["Close"])
-            if len(sub) == 0:
-                raise ValueError("No data")
+        results = []
+        single = len(active_symbols) == 1
 
-            latest = sub.iloc[-1]
-            price = round(float(latest["Close"]), 2)
-            day_high = round(float(latest["High"]), 2)
-            day_low = round(float(latest["Low"]), 2)
-            prev_close = round(float(sub.iloc[-2]["Close"]), 2) if len(sub) >= 2 else round(float(latest["Open"]), 2)
+        for sym in symbols:
+            if sym in DEAD_SYMBOLS or df is None or df.empty:
+                results.append(_na_entry(sym))
+                continue
 
-            change = round(price - prev_close, 2)
-            pct_change = round((change / prev_close) * 100, 2) if prev_close else 0.0
-            high_pct = round(((day_high - prev_close) / prev_close) * 100, 2) if prev_close else 0.0
-            low_pct = round(((day_low - prev_close) / prev_close) * 100, 2) if prev_close else 0.0
+            try:
+                sub = df if single else df[sym]
+                sub = sub.dropna(subset=["Close"])
+                if len(sub) == 0:
+                    raise ValueError("No data")
 
-            results.append({
-                "symbol": sym.replace(".NS", "").replace(".BO", ""),
-                "full_symbol": sym,
-                "price": price,
-                "day_high": day_high,
-                "high_pct": high_pct,
-                "day_low": day_low,
-                "low_pct": low_pct,
-                "change": change,
-                "pct_change": pct_change
-            })
-        except Exception:
-            results.append({
-                "symbol": sym.replace(".NS", "").replace(".BO", ""),
-                "full_symbol": sym,
-                "price": "N/A",
-                "day_high": "N/A",
-                "high_pct": 0,
-                "day_low": "N/A",
-                "low_pct": 0,
-                "change": 0,
-                "pct_change": 0
-            })
+                latest = sub.iloc[-1]
+                price = round(float(latest["Close"]), 2)
+                day_high = round(float(latest["High"]), 2)
+                day_low = round(float(latest["Low"]), 2)
+                prev_close = (
+                    round(float(sub.iloc[-2]["Close"]), 2)
+                    if len(sub) >= 2
+                    else round(float(latest["Open"]), 2)
+                )
 
-    CACHE["time"] = time.time()
-    CACHE["data"] = results
-    return results
+                change = round(price - prev_close, 2)
+                pct_change = round((change / prev_close) * 100, 2) if prev_close else 0.0
+                high_pct = (
+                    round(((day_high - prev_close) / prev_close) * 100, 2)
+                    if prev_close
+                    else 0.0
+                )
+                low_pct = (
+                    round(((day_low - prev_close) / prev_close) * 100, 2)
+                    if prev_close
+                    else 0.0
+                )
+
+                results.append(
+                    {
+                        "symbol": sym.replace(".NS", "").replace(".BO", ""),
+                        "full_symbol": sym,
+                        "price": price,
+                        "day_high": day_high,
+                        "high_pct": high_pct,
+                        "day_low": day_low,
+                        "low_pct": low_pct,
+                        "change": change,
+                        "pct_change": pct_change,
+                    }
+                )
+            except Exception:
+                DEAD_SYMBOLS.add(sym)
+                results.append(_na_entry(sym))
+
+        CACHE["time"] = time.time()
+        CACHE["data"] = results
+        return results
+
 
 @app.route("/")
 def index():
     return render_template("index.html")
 
+
 @app.route("/api/prices")
 def api_prices():
-    return jsonify(get_stock_data(get_watchlist()))
+    force = request.args.get("force") == "1"
+    return jsonify(get_stock_data(get_watchlist(), force=force))
+
+
+@app.route("/api/remove", methods=["POST"])
+def remove_stocks():
+    symbols = request.json.get("symbols", [])
+    if symbols:
+        conn = sqlite3.connect(DB_FILE)
+        conn.executemany("DELETE FROM stocks WHERE symbol=?", [(s,) for s in symbols])
+        conn.commit()
+        conn.close()
+        for s in symbols:
+            DEAD_SYMBOLS.discard(s)
+        CACHE["time"] = 0
+    return jsonify({"status": "ok", "removed": len(symbols)})
+
+
+
 
 @app.route("/api/add", methods=["POST"])
 def add_stock():
@@ -111,12 +168,14 @@ def add_stock():
     if symbol and not (symbol.endswith(".NS") or symbol.endswith(".BO")):
         symbol += ".NS"
     if symbol:
+        DEAD_SYMBOLS.discard(symbol)
         conn = sqlite3.connect(DB_FILE)
         conn.execute("INSERT OR IGNORE INTO stocks VALUES (?)", (symbol,))
         conn.commit()
         conn.close()
         CACHE["time"] = 0
     return jsonify({"status": "ok", "watchlist": get_watchlist()})
+
 
 @app.route("/api/upload", methods=["POST"])
 def upload_excel():
@@ -125,7 +184,10 @@ def upload_excel():
 
     file = request.files["file"]
     if not file.filename.endswith((".xlsx", ".xls")):
-        return jsonify({"status": "error", "message": "Please upload a .xlsx Excel file"}), 400
+        return (
+            jsonify({"status": "error", "message": "Please upload a .xlsx Excel file"}),
+            400,
+        )
 
     wb = openpyxl.load_workbook(file, data_only=True)
     sheet = wb.active
@@ -140,6 +202,7 @@ def upload_excel():
             continue
         if not (sym.endswith(".NS") or sym.endswith(".BO")):
             sym += ".NS"
+        DEAD_SYMBOLS.discard(sym)
         conn.execute("INSERT OR IGNORE INTO stocks VALUES (?)", (sym,))
         added_count += 1
 
@@ -148,30 +211,22 @@ def upload_excel():
     CACHE["time"] = 0
     return jsonify({"status": "ok", "added": added_count})
 
-@app.route("/manifest.json")
-def manifest():
-    return jsonify({
-        "name": "NSE Live Watchlist",
-        "short_name": "NSE Watchlist",
-        "start_url": "/",
-        "display": "standalone",
-        "background_color": "#0f172a",
-        "theme_color": "#10b981",
-        "description": "Live Indian Share Market Watchlist",
-        "icons": [
-            {
-                "src": "https://flaticon.com",
-                "sizes": "512x512",
-                "type": "image/png"
-            }
-        ]
-    })
 
-@app.route("/sw.js")
-def service_worker():
-    return "self.addEventListener('fetch', function(event) {});", 200, {"Content-Type": "application/javascript"}
+@app.route("/cleanup")
+def cleanup_invalid():
+    data = get_stock_data(get_watchlist())
+    invalid = [item["full_symbol"] for item in data if item["price"] == "N/A"]
+    if invalid:
+        conn = sqlite3.connect(DB_FILE)
+        conn.executemany("DELETE FROM stocks WHERE symbol=?", [(s,) for s in invalid])
+        conn.commit()
+        conn.close()
+        DEAD_SYMBOLS.clear()
+        CACHE["time"] = 0
+    return jsonify({"removed": invalid, "remaining": len(data) - len(invalid)})
+
 
 init_db()
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=False)
+    app.run(host="0.0.0.0", port=5000, debug=True)
