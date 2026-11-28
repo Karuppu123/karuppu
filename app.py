@@ -8,15 +8,14 @@ import pandas as pd
 from flask import Flask, render_template, jsonify, request
 import yfinance as yf
 
-# Silence yfinance console errors
-logging.getLogger("yfinance").setLevel(logging.CRITICAL)
+# Show yfinance errors in Render logs so we can see if Yahoo blocks requests
+logging.getLogger("yfinance").setLevel(logging.ERROR)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 app = Flask(__name__, template_folder=os.path.join(BASE_DIR, "templates"))
 DB_FILE = os.path.join(BASE_DIR, "watchlist.db")
 
 CACHE = {"time": 0, "data": []}
-DEAD_SYMBOLS = set()
 FETCH_LOCK = threading.Lock()
 
 
@@ -54,22 +53,60 @@ def _na_entry(sym):
     }
 
 
+def _parse_history(sym, sub):
+    sub = sub.dropna(subset=["Close"])
+    if len(sub) == 0:
+        return None
+
+    latest = sub.iloc[-1]
+    price = round(float(latest["Close"]), 2)
+    day_high = round(float(latest["High"]), 2)
+    day_low = round(float(latest["Low"]), 2)
+    prev_close = (
+        round(float(sub.iloc[-2]["Close"]), 2)
+        if len(sub) >= 2
+        else round(float(latest["Open"]), 2)
+    )
+
+    change = round(price - prev_close, 2)
+    pct_change = round((change / prev_close) * 100, 2) if prev_close else 0.0
+    high_pct = (
+        round(((day_high - prev_close) / prev_close) * 100, 2)
+        if prev_close
+        else 0.0
+    )
+    low_pct = (
+        round(((day_low - prev_close) / prev_close) * 100, 2)
+        if prev_close
+        else 0.0
+    )
+
+    return {
+        "symbol": sym.replace(".NS", "").replace(".BO", ""),
+        "full_symbol": sym,
+        "price": price,
+        "day_high": day_high,
+        "high_pct": high_pct,
+        "day_low": day_low,
+        "low_pct": low_pct,
+        "change": change,
+        "pct_change": pct_change,
+    }
+
+
 def get_stock_data(symbols, force=False):
     if not symbols:
         return []
 
     with FETCH_LOCK:
-        # 30-second cache prevents Render 502 memory crashes and Yahoo rate limits
         if not force and time.time() - CACHE["time"] < 60 and len(CACHE["data"]) == len(symbols):
             return CACHE["data"]
 
-        active_symbols = [s for s in symbols if s not in DEAD_SYMBOLS]
         data_map = {}
+        chunk_size = 20
 
-        # Download in batches of 25 with threads=False to stay under Render's 512MB RAM limit
-        chunk_size = 25
-        for i in range(0, len(active_symbols), chunk_size):
-            batch = active_symbols[i : i + chunk_size]
+        for i in range(0, len(symbols), chunk_size):
+            batch = symbols[i : i + chunk_size]
             try:
                 df = yf.download(
                     tickers=batch,
@@ -79,69 +116,45 @@ def get_stock_data(symbols, force=False):
                     threads=False,
                     progress=False,
                 )
-            except Exception:
+            except Exception as e:
+                print(f"Batch download error: {e}", flush=True)
                 df = None
 
-            if df is None or df.empty:
-                continue
-
-            for sym in batch:
-                try:
-                    if isinstance(df.columns, pd.MultiIndex):
-                        if sym in df.columns.get_level_values(0):
-                            sub = df[sym]
-                        elif sym in df.columns.get_level_values(1):
-                            sub = df.xs(sym, axis=1, level=1)
+            if df is not None and not df.empty:
+                for sym in batch:
+                    try:
+                        if isinstance(df.columns, pd.MultiIndex):
+                            if sym in df.columns.get_level_values(0):
+                                sub = df[sym]
+                            elif sym in df.columns.get_level_values(1):
+                                sub = df.xs(sym, axis=1, level=1)
+                            else:
+                                continue
                         else:
-                            raise ValueError("Missing")
-                    else:
-                        sub = df
+                            sub = df
 
-                    sub = sub.dropna(subset=["Close"])
-                    if len(sub) == 0:
-                        raise ValueError("Empty")
+                        parsed = _parse_history(sym, sub)
+                        if parsed:
+                            data_map[sym] = parsed
+                    except Exception as e:
+                        print(f"Parse error for {sym}: {e}", flush=True)
 
-                    latest = sub.iloc[-1]
-                    price = round(float(latest["Close"]), 2)
-                    day_high = round(float(latest["High"]), 2)
-                    day_low = round(float(latest["Low"]), 2)
-                    prev_close = (
-                        round(float(sub.iloc[-2]["Close"]), 2)
-                        if len(sub) >= 2
-                        else round(float(latest["Open"]), 2)
-                    )
-
-                    change = round(price - prev_close, 2)
-                    pct_change = round((change / prev_close) * 100, 2) if prev_close else 0.0
-                    high_pct = (
-                        round(((day_high - prev_close) / prev_close) * 100, 2)
-                        if prev_close
-                        else 0.0
-                    )
-                    low_pct = (
-                        round(((day_low - prev_close) / prev_close) * 100, 2)
-                        if prev_close
-                        else 0.0
-                    )
-
-                    data_map[sym] = {
-                        "symbol": sym.replace(".NS", "").replace(".BO", ""),
-                        "full_symbol": sym,
-                        "price": price,
-                        "day_high": day_high,
-                        "high_pct": high_pct,
-                        "day_low": day_low,
-                        "low_pct": low_pct,
-                        "change": change,
-                        "pct_change": pct_change,
-                    }
-                except Exception:
-                    DEAD_SYMBOLS.add(sym)
+            # Fallback: fetch any missed symbols individually via Ticker().history()
+            for sym in batch:
+                if sym not in data_map:
+                    try:
+                        hist = yf.Ticker(sym).history(period="5d", interval="1d")
+                        parsed = _parse_history(sym, hist)
+                        if parsed:
+                            data_map[sym] = parsed
+                    except Exception as e:
+                        print(f"Single ticker error for {sym}: {e}", flush=True)
 
         results = [data_map.get(sym, _na_entry(sym)) for sym in symbols]
         CACHE["time"] = time.time()
         CACHE["data"] = results
         return results
+
 
 
 
