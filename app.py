@@ -60,7 +60,7 @@ def get_stock_data(symbols, force=False):
 
     with FETCH_LOCK:
         # 30-second cache prevents Render 502 memory crashes and Yahoo rate limits
-        if not force and time.time() - CACHE["time"] < 30 and len(CACHE["data"]) == len(symbols):
+        if not force and time.time() - CACHE["time"] < 60 and len(CACHE["data"]) == len(symbols):
             return CACHE["data"]
 
         active_symbols = [s for s in symbols if s not in DEAD_SYMBOLS]
