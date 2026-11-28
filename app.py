@@ -1,4 +1,3 @@
-%%writefile app.py
 import os
 import time
 import logging
@@ -34,7 +33,7 @@ def get_watchlist():
     conn = sqlite3.connect(DB_FILE)
     cur = conn.cursor()
     cur.execute("SELECT symbol FROM stocks")
-    symbols = [row for row in cur.fetchall()]
+    symbols = [row[0] for row in cur.fetchall()]
     conn.close()
     return symbols
 
@@ -210,9 +209,9 @@ def upload_excel():
     conn = sqlite3.connect(DB_FILE)
     added_count = 0
     for row in sheet.iter_rows(values_only=True):
-        if not row or not row:
+        if not row or not row[0]:
             continue
-        sym = str(row).strip().upper()
+        sym = str(row[0]).strip().upper()
         if sym in ("SYMBOL", "SYMBOLS", "STOCK", "TICKER", "NAME"):
             continue
         if not (sym.endswith(".NS") or sym.endswith(".BO")):
@@ -243,3 +242,4 @@ init_db()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)
+    
