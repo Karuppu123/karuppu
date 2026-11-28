@@ -1,6 +1,6 @@
 import os
 import time
-import logging 
+import logging
 import sqlite3
 import threading
 import openpyxl
@@ -8,7 +8,6 @@ import pandas as pd
 from flask import Flask, render_template, jsonify, request
 import yfinance as yf
 
-# Show yfinance errors in Render logs so we can see if Yahoo blocks requests
 logging.getLogger("yfinance").setLevel(logging.ERROR)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -139,7 +138,6 @@ def get_stock_data(symbols, force=False):
                     except Exception as e:
                         print(f"Parse error for {sym}: {e}", flush=True)
 
-            # Fallback: fetch any missed symbols individually via Ticker().history()
             for sym in batch:
                 if sym not in data_map:
                     try:
@@ -154,8 +152,6 @@ def get_stock_data(symbols, force=False):
         CACHE["time"] = time.time()
         CACHE["data"] = results
         return results
-
-
 
 
 @app.route("/")
@@ -177,12 +173,8 @@ def remove_stocks():
         conn.executemany("DELETE FROM stocks WHERE symbol=?", [(s,) for s in symbols])
         conn.commit()
         conn.close()
-        for s in symbols:
-            DEAD_SYMBOLS.discard(s)
         CACHE["time"] = 0
     return jsonify({"status": "ok", "removed": len(symbols)})
-
-
 
 
 @app.route("/api/add", methods=["POST"])
@@ -191,7 +183,6 @@ def add_stock():
     if symbol and not (symbol.endswith(".NS") or symbol.endswith(".BO")):
         symbol += ".NS"
     if symbol:
-        DEAD_SYMBOLS.discard(symbol)
         conn = sqlite3.connect(DB_FILE)
         conn.execute("INSERT OR IGNORE INTO stocks VALUES (?)", (symbol,))
         conn.commit()
@@ -225,7 +216,6 @@ def upload_excel():
             continue
         if not (sym.endswith(".NS") or sym.endswith(".BO")):
             sym += ".NS"
-        DEAD_SYMBOLS.discard(sym)
         conn.execute("INSERT OR IGNORE INTO stocks VALUES (?)", (sym,))
         added_count += 1
 
@@ -244,7 +234,6 @@ def cleanup_invalid():
         conn.executemany("DELETE FROM stocks WHERE symbol=?", [(s,) for s in invalid])
         conn.commit()
         conn.close()
-        DEAD_SYMBOLS.clear()
         CACHE["time"] = 0
     return jsonify({"removed": invalid, "remaining": len(data) - len(invalid)})
 
@@ -253,3 +242,4 @@ init_db()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)
+    
